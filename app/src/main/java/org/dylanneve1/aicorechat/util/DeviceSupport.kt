@@ -61,7 +61,9 @@ suspend fun checkDeviceSupport(context: Context): DeviceSupportStatus = withCont
                     DeviceSupportStatus.NotReady(downloadError ?: "Downloading Gemini Nano model in progress...")
                 }
             }
-            FeatureStatus.UNAVAILABLE -> DeviceSupportStatus.NotReady("Gemini Nano Prompt API is unavailable on this device")
+            FeatureStatus.UNAVAILABLE -> DeviceSupportStatus.NotReady(
+                "Gemini Nano Prompt API is unavailable on this device",
+            )
             else -> DeviceSupportStatus.NotReady("Unexpected feature status: $status")
         }
     } catch (e: Exception) {
