@@ -3,9 +3,12 @@ package org.dylanneve1.aicorechat.util
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
-import com.google.ai.edge.aicore.GenerativeModel
-import com.google.ai.edge.aicore.generationConfig
+import com.google.mlkit.genai.common.DownloadStatus
+import com.google.mlkit.genai.common.FeatureStatus
+import com.google.mlkit.genai.prompt.Generation
+import com.google.mlkit.genai.prompt.GenerativeModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 
 sealed class DeviceSupportStatus {
@@ -42,14 +45,25 @@ suspend fun checkDeviceSupport(context: Context): DeviceSupportStatus = withCont
 
     var model: GenerativeModel? = null
     try {
-        val cfg = generationConfig {
-            this.context = context.applicationContext
-            temperature = 0.1f
-            topK = 1
+        model = Generation.getClient()
+        when (val status = model.checkStatus()) {
+            FeatureStatus.AVAILABLE -> DeviceSupportStatus.Supported
+            FeatureStatus.DOWNLOADABLE, FeatureStatus.DOWNLOADING -> {
+                var downloadError: String? = null
+                model.download().collect { downloadStatus ->
+                    if (downloadStatus is DownloadStatus.DownloadFailed) {
+                        downloadError = downloadStatus.e.message
+                    }
+                }
+                if (downloadError == null && model.checkStatus() == FeatureStatus.AVAILABLE) {
+                    DeviceSupportStatus.Supported
+                } else {
+                    DeviceSupportStatus.NotReady(downloadError ?: "Downloading Gemini Nano model in progress...")
+                }
+            }
+            FeatureStatus.UNAVAILABLE -> DeviceSupportStatus.NotReady("Gemini Nano Prompt API is unavailable on this device")
+            else -> DeviceSupportStatus.NotReady("Unexpected feature status: $status")
         }
-        model = GenerativeModel(generationConfig = cfg)
-        model.prepareInferenceEngine()
-        DeviceSupportStatus.Supported
     } catch (e: Exception) {
         DeviceSupportStatus.NotReady(e.message)
     } finally {
