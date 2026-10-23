@@ -14,7 +14,7 @@ androidxTestCore = "1.7.0"
 spotless = "7.2.1"
 detekt = "1.23.8"
 ktlint = "1.2.1"
-aicore = "0.0.1-exp02"
+aicore = "1.0.0-beta1"
 playServicesLocation = "21.3.0"
 mlkitImageDescription = "1.0.0-beta1"
 coroutines = "1.10.2"
@@ -39,7 +39,7 @@ androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-
 androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4", version.ref = "composeUi" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "composeMaterial3" }
 androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTestCore" }
-aicore = { group = "com.google.ai.edge.aicore", name = "aicore", version.ref = "aicore" }
+aicore = { group = "com.google.mlkit", name = "genai-prompt", version.ref = "aicore" }
 play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
 mlkit-image-description = { group = "com.google.mlkit", name = "genai-image-description", version.ref = "mlkitImageDescription" }
 coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "coroutines" }
