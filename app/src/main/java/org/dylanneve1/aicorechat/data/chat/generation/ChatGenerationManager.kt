@@ -3,7 +3,6 @@ package org.dylanneve1.aicorechat.data.chat.generation
 import android.app.Application
 import android.os.SystemClock
 import android.util.Log
-import com.google.ai.edge.aicore.GenerativeModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -78,7 +77,7 @@ class ChatGenerationManager(
         launchAssistantResponse(model, userMessage, userMessage.text)
     }
 
-    private fun launchAssistantResponse(model: GenerativeModel, userMessage: ChatMessage, userPrompt: String) {
+    private fun launchAssistantResponse(model: ChatGenerativeModel, userMessage: ChatMessage, userPrompt: String) {
         generationJob?.cancel()
 
         generationJob = scope.launch {
