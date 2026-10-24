@@ -83,18 +83,34 @@ class ChatGenerationManager(
         generationJob = scope.launch {
             try {
                 val allowSearch = state.value.webSearchEnabled && webSearchService.isOnline()
+
+                // Jeśli użytkownik włączył Web Search, od razu pobieramy wyniki z sieci
+                if (allowSearch) {
+                    state.update {
+                        it.copy(
+                            isGenerating = true,
+                            isSearchInProgress = true,
+                            currentSearchQuery = userPrompt,
+                            modelError = null,
+                            messages = it.messages + ChatMessage(text = "", isFromUser = false, isStreaming = true),
+                        )
+                    }
+                    continueWithSearchResults(userMessage, userPrompt)
+                    return@launch
+                }
+
                 val prompt = promptBuilder.buildInitialPrompt(
                     state = state.value,
                     userPrompt = userPrompt,
                     userMessage = userMessage,
-                    allowSearch = allowSearch,
+                    allowSearch = false,
                     offlineNotice = state.value.webSearchEnabled && !allowSearch,
                 )
 
                 debugLog("Sending prompt:\n$prompt")
 
                 val handler = StreamHandler(
-                    allowSearch = allowSearch,
+                    allowSearch = false,
                     userMessage = userMessage,
                     triggerSearch = { query ->
                         scope.launch { continueWithSearchResults(userMessage, query) }
@@ -125,6 +141,7 @@ class ChatGenerationManager(
         state.update {
             it.copy(
                 isGenerating = false,
+                isSearchInProgress = false,
                 messages = it.messages + ChatMessage(
                     text = "Error: ${throwable.message}",
                     isFromUser = false,
@@ -329,7 +346,7 @@ class ChatGenerationManager(
             val model = modelManager.getModel() ?: return
             val results = webSearchService.search(query)
             val stateSnapshot = state.value
-            val recentMessages = stateSnapshot.messages.filter { !it.isStreaming } + userMessage
+            val recentMessages = stateSnapshot.messages.filter { !it.isStreaming }
             val prompt = promptBuilder.buildSearchFollowUpPrompt(
                 state = stateSnapshot,
                 userMessage = userMessage,
