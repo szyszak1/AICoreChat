@@ -24,9 +24,6 @@ class ChatPromptBuilder(
         }
 
         builder.append(PromptTemplates.fewShotGeneral())
-        if (allowSearch) {
-            builder.append(PromptTemplates.fewShotSearch())
-        }
 
         if (state.personalContextEnabled) {
             builder.append(personalContextProvider.build(state.userName))
@@ -49,21 +46,17 @@ class ChatPromptBuilder(
             }
         }
 
-        val history = state.messages.takeLast(10)
+        val history = state.messages.takeLast(6)
         val priorMessages = history.filter { it.id != userMessage.id }
-        if (priorMessages.isEmpty()) {
-            builder.append(PromptTemplates.emptyHistoryNotice())
-        } else {
-            priorMessages.forEach { message ->
-                if (message.isFromUser) {
-                    builder.append("[USER]\n${message.text}\n[/USER]\n")
-                } else {
-                    builder.append("[ASSISTANT]\n${message.text}\n[/ASSISTANT]\n")
-                }
+        priorMessages.forEach { message ->
+            if (message.isFromUser) {
+                builder.append("[USER]\n${message.text}\n[/USER]\n")
+            } else {
+                builder.append("[ASSISTANT]\n${message.text}\n[/ASSISTANT]\n")
             }
         }
 
-        builder.append("[USER]\n$userPrompt\n[/USER]\n")
+        builder.append("[USER]\n$userPrompt (Odpowiedz po polsku)\n[/USER]\n")
         builder.append("[ASSISTANT]\n")
         return builder.toString()
     }
@@ -75,32 +68,15 @@ class ChatPromptBuilder(
         webResults: String,
     ): String {
         val builder = StringBuilder()
-        builder.append(PromptTemplates.postSearchPreamble())
+        builder.append("Zadanie: Przeczytaj poniższy tekst źródłowy i wyciągnij z niego odpowiedź po polsku.\n")
+        builder.append("Odpowiadaj wyłącznie na podstawie podanego tekstu źródłowego. Nie oceniaj, czy dane są aktualne – po prostu odczytaj liczby i fakty z tekstu.\n\n")
 
-        if (state.customInstructionsEnabled && state.customInstructions.isNotBlank()) {
-            builder.append(PromptTemplates.customInstructionsBlock(state.customInstructions))
-        }
-
-        builder.append("[WEB_RESULTS]\n$webResults\n[/WEB_RESULTS]\n\n")
-
-        if (state.memoryContextEnabled) {
-            val relevantMemories = PromptTemplates.buildMemoryContextFromQuery(
-                query = userMessage.text,
-                allMemories = state.memoryEntries,
-            )
-            val bioInfo = if (state.bioContextEnabled) state.bioInformation else null
-            builder.append(PromptTemplates.memoryContextBlock(relevantMemories, bioInfo))
-        }
-
-        recentMessages.takeLast(10).forEach { message ->
-            if (message.isFromUser) {
-                builder.append("[USER]\n${message.text}\n[/USER]\n")
-            } else {
-                builder.append("[ASSISTANT]\n${message.text}\n[/ASSISTANT]\n")
-            }
-        }
-
-        builder.append("[ASSISTANT]\n")
+        builder.append("[USER]\n")
+        builder.append("TEKST ŹRÓDŁOWY:\n")
+        builder.append("$webResults\n\n")
+        builder.append("Zadanie: Korzystając wyłącznie z powyższego TEKSTU ŹRÓDŁOWEGO, odpowiedz krótko po polsku na temat: ${userMessage.text}\n")
+        builder.append("[/USER]\n")
+        builder.append("[ASSISTANT]\nWedług podanych informacji: ")
         return builder.toString()
     }
 }
