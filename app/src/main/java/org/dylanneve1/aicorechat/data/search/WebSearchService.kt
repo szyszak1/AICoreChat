@@ -13,7 +13,6 @@ import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -21,10 +20,6 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
-/**
- * WebSearchService encapsulates connectivity checks and retrieval of high-signal
- * search context (titles, snippets, dates, and scraped page content) suitable for LLM prompts.
- */
 class WebSearchService(private val app: Application) {
     fun isOnline(): Boolean {
         return try {
@@ -44,54 +39,47 @@ class WebSearchService(private val app: Application) {
 
     suspend fun search(query: String): String = withContext(Dispatchers.IO) {
         runCatching {
-            val html = fetchSearchHtml(query)
-            val blocks = parseSearchBlocks(html)
-            if (blocks.isEmpty()) return@runCatching "No results"
+            val doc = fetchSearchDocument(query)
+            val resultElements = doc.select("div.result, div.web-result, div.results_links")
+                .take(SEARCH_RESULT_LIMIT)
+
+            if (resultElements.isEmpty()) return@runCatching "Brak wyników wyszukiwania"
 
             val entries = coroutineScope {
-                blocks.mapIndexed { index, block ->
-                    async { processSearchBlock(index, block) }
+                resultElements.mapIndexed { index, element ->
+                    async { processResultElement(index, element) }
                 }.awaitAll()
             }.filterNotNull()
 
-            if (entries.isEmpty()) "No results" else entries.joinToString("\n\n")
+            if (entries.isEmpty()) "Brak wyników wyszukiwania" else entries.joinToString("\n\n")
         }.getOrElse { error ->
             if (error is CancellationException) throw error
-            "No results (error: ${error.message})"
+            "Brak wyników (błąd: ${error.message})"
         }
     }
 
-    private fun fetchSearchHtml(query: String): String {
+    private fun fetchSearchDocument(query: String): Document {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        val url = URL("https://duckduckgo.com/html/?q=$encoded&kl=us-en")
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            setRequestProperty("User-Agent", USER_AGENT)
-            connectTimeout = SEARCH_TIMEOUT_MS
-            readTimeout = SEARCH_TIMEOUT_MS
-        }
-        return try {
-            connection.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            connection.disconnect()
-        }
+        val url = "https://html.duckduckgo.com/html/?q=$encoded&kl=pl-pl"
+        return Jsoup.connect(url)
+            .userAgent(USER_AGENT)
+            .header("Accept-Language", "pl-PL,pl;q=0.9,en-US;q=0.8")
+            .timeout(SEARCH_TIMEOUT_MS)
+            .followRedirects(true)
+            .get()
     }
 
-    private fun parseSearchBlocks(html: String): List<String> =
-        RESULT_BLOCK_REGEX.findAll(html).take(SEARCH_RESULT_LIMIT).map { it.value }.toList()
-
-    private suspend fun processSearchBlock(index: Int, block: String): String? {
-        val fields = extractResultFields(block)
-        val realUrl = decodeDuckRedirect(fields.href)
+    private suspend fun processResultElement(index: Int, element: Element): String? {
+        val titleEl = element.selectFirst("a.result__a, h2 a, a.result-link") ?: return null
+        var title = titleEl.text().trim()
+        val rawHref = titleEl.attr("href").trim()
+        val realUrl = decodeDuckRedirect(rawHref)
         if (!realUrl.startsWith("http")) return null
 
-        val host = hostname(realUrl)
-        var title = fields.title
-        var summary = fields.summary
-        var dateIso = fields.timestamp
-            .takeIf { it.isNotBlank() && !it.contains("ago", ignoreCase = true) }
-            ?.let { parseDateToIso(it) }
+        val snippetEl = element.selectFirst(".result__snippet, .result-snippet")
+        var summary = snippetEl?.text()?.trim()?.let(::clampSummary).orEmpty()
 
+        val host = hostname(realUrl)
         val snapshot = scrapePage(realUrl)
         if (snapshot != null) {
             if (title.isBlank() && !snapshot.title.isNullOrBlank()) {
@@ -104,63 +92,25 @@ class WebSearchService(private val app: Application) {
             if ((summary.isBlank() || summary.length < MIN_SNIPPET_LENGTH) && snapshotSummary != null) {
                 summary = snapshotSummary
             }
-            if (dateIso.isNullOrBlank() && !snapshot.published.isNullOrBlank()) {
-                dateIso = snapshot.published
-            }
         }
 
         val content = snapshot?.content
         if (title.isBlank() && summary.isBlank() && content.isNullOrBlank()) return null
 
-        val header = buildHeader(host, title, dateIso)
+        val header = buildHeader(host, title, snapshot?.published)
 
         return buildString {
             append("${index + 1}. ")
             append(header)
             if (summary.isNotBlank()) {
-                append("\n- Summary: ")
+                append("\n- Podsumowanie: ")
                 append(summary)
             }
             if (!content.isNullOrBlank()) {
-                append("\n- Content:\n")
+                append("\n- Treść:\n")
                 append(content)
             }
-            append("\n- URL: ")
-            append(realUrl)
         }.trimEnd()
-    }
-
-    private fun extractResultFields(block: String): ResultFields {
-        val title = extractTitle(block)
-        val href = htmlDecode(RESULT_LINK_REGEX.find(block)?.groupValues?.get(1).orEmpty())
-        val summary = extractSnippet(block)
-        val timestamp = extractTimestamp(block)
-        return ResultFields(title, href, summary, timestamp)
-    }
-
-    private fun extractTitle(block: String): String {
-        val rawTitle = RESULT_TITLE_REGEX.find(block)?.groupValues?.get(1).orEmpty()
-        if (rawTitle.isBlank()) return ""
-        return htmlDecode(rawTitle.replace(TAG_REGEX, "").trim())
-    }
-
-    private fun extractSnippet(block: String): String {
-        val rawSnippet = RESULT_SNIPPET_REGEX.find(block)?.groupValues?.get(1).orEmpty()
-        if (rawSnippet.isBlank()) return ""
-        val sanitized = rawSnippet
-            .replace(TAG_REGEX, " ")
-            .replace("\n", " ")
-            .replace(MULTISPACE_REGEX, " ")
-            .trim()
-        if (sanitized.isBlank()) return ""
-        val decoded = htmlDecode(sanitized)
-        return clampSummary(decoded)
-    }
-
-    private fun extractTimestamp(block: String): String {
-        val rawTimestamp = RESULT_TIMESTAMP_REGEX.find(block)?.groupValues?.get(1).orEmpty()
-        if (rawTimestamp.isBlank()) return ""
-        return htmlDecode(rawTimestamp).trim()
     }
 
     private fun buildHeader(host: String, title: String, dateIso: String?): String {
@@ -177,30 +127,13 @@ class WebSearchService(private val app: Application) {
         }.ifBlank { host }
     }
 
-    private fun htmlDecode(input: String): String {
-        var s = input
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&nbsp;", " ")
-        val dec = Regex("""&#(\d+);""")
-        s = dec.replace(s) { m ->
-            val code = m.groupValues[1].toIntOrNull() ?: return@replace m.value
-            code.toChar().toString()
-        }
-        val hex = Regex("""&#x([0-9a-fA-F]+);""")
-        s = hex.replace(s) { m ->
-            val code = m.groupValues[1].toIntOrNull(16) ?: return@replace m.value
-            code.toChar().toString()
-        }
-        return s
-    }
-
     private fun decodeDuckRedirect(href: String): String {
         return try {
-            val h = if (href.startsWith("//")) "https:$href" else href
+            val h = when {
+                href.startsWith("//") -> "https:$href"
+                href.startsWith("/") -> "https://duckduckgo.com$href"
+                else -> href
+            }
             if (h.startsWith("http")) {
                 val idx = h.indexOf("uddg=")
                 if (idx != -1) {
@@ -235,16 +168,8 @@ class WebSearchService(private val app: Application) {
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
             "EEE, dd MMM yyyy HH:mm:ss zzz",
-            "EEE, d MMM yyyy HH:mm:ss zzz",
-            "EEE, d MMM yyyy HH:mm zzz",
             "yyyy-MM-dd HH:mm:ss",
             "yyyy-MM-dd",
-            "dd MMM yyyy",
-            "d MMM yyyy",
-            "MMM d, yyyy",
-            "MMMM d, yyyy",
-            "yyyy/MM/dd",
-            "MM/dd/yyyy",
         )
         for (p in candidates) {
             try {
@@ -285,6 +210,7 @@ class WebSearchService(private val app: Application) {
         return try {
             Jsoup.connect(targetUrl)
                 .userAgent(USER_AGENT)
+                .header("Accept-Language", "pl-PL,pl;q=0.9")
                 .timeout(PAGE_TIMEOUT_MS)
                 .followRedirects(true)
                 .ignoreContentType(true)
@@ -303,10 +229,6 @@ class WebSearchService(private val app: Application) {
             "meta[name=date]",
             "meta[itemprop=datePublished]",
             "meta[property=og:updated_time]",
-            "meta[name=dc.date]",
-            "meta[name=dc.date.issued]",
-            "meta[name=DC.date.issued]",
-            "meta[name=OriginalPublicationDate]",
         )
         for (selector in selectors) {
             doc.select(selector).forEach { element ->
@@ -316,10 +238,6 @@ class WebSearchService(private val app: Application) {
         }
         doc.select("time[datetime]").forEach { element ->
             val value = element.attr("datetime").trim()
-            if (value.isNotEmpty()) candidates.add(value)
-        }
-        doc.select("time").forEach { element ->
-            val value = element.text().trim()
             if (value.isNotEmpty()) candidates.add(value)
         }
         return candidates.asSequence()
@@ -333,11 +251,7 @@ class WebSearchService(private val app: Application) {
             "main",
             "[role=main]",
             "div[itemprop=articleBody]",
-            "section[itemprop=articleBody]",
-            "div[data-component=\"articleBody\"]",
-            "div[data-testid=\"article-body\"]",
             "div[class*=article-body]",
-            "section[class*=article-body]",
             "div[class*=post-content]",
             "#content",
         )
@@ -403,13 +317,6 @@ class WebSearchService(private val app: Application) {
         return MULTISPACE_REGEX.replace(value.replace('\u00A0', ' '), " ").trim()
     }
 
-    private data class ResultFields(
-        val title: String,
-        val href: String,
-        val summary: String,
-        val timestamp: String,
-    )
-
     private data class PageSnapshot(
         val title: String?,
         val summary: String?,
@@ -418,30 +325,16 @@ class WebSearchService(private val app: Application) {
     )
 
     private companion object {
-        private const val SEARCH_RESULT_LIMIT = 5
+        private const val SEARCH_RESULT_LIMIT = 4
         private const val SEARCH_TIMEOUT_MS = 8000
-        private const val PAGE_TIMEOUT_MS = 12_000
-        private const val PAGE_CONTENT_LIMIT = 2400
+        private const val PAGE_TIMEOUT_MS = 8000
+        private const val PAGE_CONTENT_LIMIT = 1500
         private const val MIN_PARAGRAPH_CHARS = 40
-        private const val MIN_CONTENT_CHARS = 180
-        private const val MAX_PARAGRAPHS = 24
+        private const val MIN_CONTENT_CHARS = 150
+        private const val MAX_PARAGRAPHS = 15
         private const val MIN_SNIPPET_LENGTH = 80
-        private const val SUMMARY_CHAR_LIMIT = 320
-        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
-        private val RESULT_BLOCK_REGEX = Regex(
-            """<div class="result.*?</a>.*?</div>""",
-            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
-        )
-        private val RESULT_TITLE_REGEX =
-            Regex("""<a[^>]*class="result__a[^"]*"[^>]*>(.*?)</a>""", RegexOption.IGNORE_CASE)
-        private val RESULT_LINK_REGEX =
-            Regex("""<a[^>]*class="result__a[^"]*"[^>]*href="(.*?)""", RegexOption.IGNORE_CASE)
-        private val RESULT_SNIPPET_REGEX = Regex(
-            """(?:class="result__snippet[^"]*"[^>]*>(.*?)</(?:a|span|div)>)""",
-            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
-        )
-        private val RESULT_TIMESTAMP_REGEX = Regex("""class="result__timestamp"[^>]*>(.*?)<""", RegexOption.IGNORE_CASE)
-        private val TAG_REGEX = Regex("<.*?>")
+        private const val SUMMARY_CHAR_LIMIT = 300
+        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 10 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
         private val MULTISPACE_REGEX = Regex("\\s+")
     }
 }
